@@ -1,0 +1,262 @@
+---
+title: "Лабораторна робота №3. Розвідувальний аналіз даних. Візуалізація"
+author: "Матвєєв Р.В."
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: yes
+    toc_float: true
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+```
+## Вступ
+
+У цій лабораторній роботі ми аналізуємо сервіс онлайн таксі.
+
+### Імпортуємо бібліотеки
+
+```{r}
+
+#install.packages("corrplot", repos = "https://cloud.r-project.org/")
+#install.packages("FactoMineR", repos = "https://cloud.r-project.org/")
+#install.packages("funModeling", repos = "https://cloud.r-project.org/")
+#install.packages("factoextra", repos = "https://cloud.r-project.org/")
+
+library(RSQLite)
+library(corrplot)
+library(FactoMineR)
+library(funModeling)
+library(factoextra)
+library(dplyr)
+
+```
+
+### Крок 1: Встановлення з'єднання та виконання SQL-запиту
+
+```{r}
+# Підключення до SQLite для використання збережених даних
+sqlite_conn <- dbConnect(SQLite(), dbname = "orders.db")
+# Отримання даних з таблиці з SQLite
+taxi_data <- dbGetQuery(sqlite_conn, "SELECT * FROM orders")
+# Закриття з'єднання
+dbDisconnect(sqlite_conn)
+```
+
+
+### Крок 2: Перевірка та дослідження завантажених даних
+
+```{r}
+
+# Зведені вибіркові характеристики
+taxi_data %>% 
+  df_status() 
+
+# Гістограм за всіма змінними
+taxi_data %>%
+  plot_num()
+
+taxi_data_filtered <- taxi_data %>%
+  filter(total_price <= 50)
+
+# Приклад: Гістограма розподілу вартості подорожей
+library(ggplot2)
+ggplot(taxi_data_filtered, aes(x = total_price)) +
+  geom_histogram(binwidth = 1) +
+  labs(title = "Розподіл вартості поїздок", x = "Вартість", y = "Кількість поїздок") +
+  scale_y_continuous(labels = scales::comma)  # Форматування осі Y для відображення цілих чисел
+
+```
+
+### Крок 3: Аналіз розподілу ключових показників
+
+#### 3.1 Побудова гістограм для кожного показника
+
+```{r}
+taxi_data_filtered <- taxi_data %>% 
+  mutate(
+    create_date = as.POSIXct(create_date, origin = "1970-01-01"),
+    distance_inside = (distance_inside + distance_slowly_inside) / 1000,
+    distance_outside = (distance_outside + distance_slowly_outside) / 1000,
+    distance = distance_inside + distance_outside,
+    duration_inside = ( duration_inside + duration_slowly_inside) / 60,
+    duration_outside = (duration_outside + duration_slowly_outside) / 60,
+    duration = duration_inside + duration_outside,
+    duration_stand = (duration_stand / 60),
+    create_month = as.POSIXct(create_date, origin = "1970-01-01"),
+    create_season = case_when(
+      format(create_month, "%m") %in% c("03", "04", "05") ~ "Spring",
+      format(create_month, "%m") %in% c("06", "07", "08") ~ "Summer",
+      format(create_month, "%m") %in% c("09", "10", "11") ~ "Fall",
+      format(create_month, "%m") %in% c("12", "01", "02") ~ "Winter"
+    )
+  ) %>% 
+  filter(total_price > 0, total_price <= 50, duration <= 120, distance <= 90)
+
+
+# Гістограма для загальної відстані
+ggplot(taxi_data_filtered, aes(x = distance)) +
+  geom_histogram(binwidth = 4) + 
+  labs(title = "Розподіл загальної відстані поїздок", x = "Загальна відстань (км.)", y = "Кількість поїздок") +
+  scale_y_continuous(labels = scales::comma)
+
+# Гистограмма для общего времени
+ggplot(taxi_data_filtered, aes(x = duration)) +
+  geom_histogram(binwidth = 5) +  
+  labs(title = "Розподіл загального часу поїздок", x = "Загальний час у дорозі (хв.)", y = "Кількість поїздок") +
+  scale_y_continuous(labels = scales::comma)
+```
+
+#### 3.2. Коробчаста діаграма для порівняння вартості за датою (якщо create_date)
+
+```{r}
+
+# Додавання стовпця з місяцем і роком
+taxi_data_filtered <- taxi_data_filtered %>%
+  mutate(
+    month = format(as.POSIXct(create_date, origin = "1970-01-01"), "%Y-%m") 
+  )
+
+# Побудова коробчастої діаграми за місяцями
+ggplot(taxi_data_filtered, aes(x = as.factor(month), y = total_price)) +
+  geom_boxplot() +
+  labs(title = "Вартість поїздок по місяцях", x = "Місяць", y = "Вартість") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+
+### Крок 4: Аналіз взаємозв'язків між ознаками
+
+#### 4.1 Діаграма розсіювання
+
+```{r}
+# Діаграма розсіювання для total_price та distance_inside
+ggplot(taxi_data_filtered, aes(x = distance, y = total_price)) +
+  geom_point(alpha = 0.5) +
+  labs(title = "Вартість поїздок vs Відстань", x = "Відстань (км)", y = "Вартість")
+
+ggplot(taxi_data_filtered, aes(x = duration, y = total_price)) +
+  geom_point(alpha = 0.5) +
+  labs(title = "Вартість поїздок vs Загальний час у дорозі", x = "Загальний час (хв.)", y = "Вартість") +
+  scale_y_continuous(labels = scales::comma)
+
+```
+
+#### 4.2 Теплова карта кореляцій
+
+```{r}
+# Розрахунок кореляцій
+numeric_data <- taxi_data_filtered %>%
+  select(total_price, distance_inside, distance_outside, duration_inside, duration_outside, duration_stand)
+
+# Розрахунок кореляційної матриці
+cor_matrix <- cor(numeric_data, use = "complete.obs")
+
+# Візуалізація теплової карти
+library(reshape2)
+melted_cor_matrix <- melt(cor_matrix)
+
+ggplot(data = melted_cor_matrix, aes(x = Var1, y = Var2, fill = value)) + 
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0, limit = c(-1, 1)) +
+  theme_minimal() +
+  labs(title = "Кореляції між змінними", x = "", y = "") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) # Поворот міток для кращої читаності
+
+```
+
+#### 4.3. Кореляційний аналіз із corrplot
+
+```{r}
+# Вибір основних змінних та розрахунок кореляційної матриці
+cor_data <- taxi_data_filtered %>%
+  select(total_price, distance, duration, duration_stand_before_moving, duration_stand) %>%
+  na.omit()
+cor_matrix <- cor(cor_data)
+
+# Візуалізація кореляційної матриці
+corrplot(cor_matrix, method = "circle", type = "upper", tl.col = "black", tl.srt = 45)
+```
+
+
+#### 4.4. Парні графіки (pairs)
+
+```{r}
+# Побудова парних графіків
+pairs(cor_data, main = "Парні графіки для основних змінних")
+```
+
+### Крок 5: Аналіз основних компонентів (PCA)
+
+#### Варіант №1
+
+```{r}
+# Стандартизація даних та видалення пропущених значень
+pca_data <- taxi_data_filtered %>%
+    select(total_price, distance_inside, distance_outside, duration_inside, duration_outside, duration_stand) %>%
+  na.omit() %>%
+  scale()
+
+# Виконання PCA
+pca_result <- prcomp(pca_data, center = TRUE, scale. = TRUE)
+
+# Перегляд частки поясненої дисперсії кожною компонентою
+summary(pca_result)
+
+# Діаграма поясненої дисперсії
+screeplot(pca_result, type = "lines", main = "Пояснена дисперсія основних компонентів")
+
+
+# Дані для графіка
+pca_df <- as.data.frame(pca_result$x)
+
+# Графік даних за першими двома головними компонентами
+ggplot(pca_df, aes(x = PC1, y = PC2)) +
+  geom_point(alpha = 0.5) +
+  labs(title = "Перші дві основні компоненти", x = "PC1", y = "PC2")
+
+```
+
+
+#### Варіант №2
+
+```{r}
+# Проведення PCA на стандартизованих даних
+resPCA <- PCA(cor_data, scale.unit = TRUE, graph = FALSE)
+
+# Отримання власних значень та кумулятивного відсотка
+eigenvalues <- as.data.frame(resPCA$eig)
+cumVar <- round(eigenvalues$`cumulative percentage of variance`[length(eigenvalues$eigenvalue[eigenvalues$eigenvalue >= 0.9])], 2)
+
+# Screeplot з використанням factoextra
+fviz_screeplot(resPCA, addlabels = TRUE, ylim = c(0, 50))
+
+# Таблиця навантажень
+knitr::kable(
+  resPCA$var$coord[, 1:2],
+  caption = "Таблиця навантажень для перших двох основних компонентів"
+)
+
+# Адаптований Biplot для таксі
+fviz_pca_biplot(resPCA,
+                geom = c("point"),
+                habillage = as.factor(taxi_data_filtered$create_season),
+                axes = c(1, 2),
+                repel = TRUE,
+                label = c("ind", "var"),
+                select.var = list(name = c("total_price", "distance_total_km", "duration_total_min")),
+                palette = c("#00FF7F", "#FFD700", "#FF8C00", "#1E90FF"), 
+                addEllipses = TRUE
+)
+
+
+```
+
+
+
+
+
+

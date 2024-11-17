@@ -1,0 +1,302 @@
+---
+title: "Лабораторна робота №2. Маніпулювання даними"
+author: "Матвєєв Р.В."
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: yes
+    toc_float: true
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+```
+
+## Вступ
+
+У цій лабораторній роботі ми аналізуємо сервіс онлайн таксі.
+
+### Імпортуємо бібліотеки
+
+```{r}
+#install.packages("RSQLite")
+#install.packages("lubridate")
+#install.packages("dplyr")
+#install.packages("jsonlite")
+
+#install.packages("purrr")
+#install.packages("tidyr")
+#install.packages("ggplot2")
+#install.packages("plotly")
+
+library(RSQLite)
+library(lubridate)
+library(dplyr)
+library(jsonlite)
+
+library(purrr)
+library(tidyr)
+library(ggplot2)
+library(plotly)
+
+```
+
+### Підключення до бази даних та завантаження даних
+
+```{r}
+# Підключення до SQLite для використання збережених даних
+sqlite_conn <- dbConnect(SQLite(), dbname = "orders.db")
+# Отримання даних з таблиці з SQLite
+orders <- dbGetQuery(sqlite_conn, "SELECT * FROM orders")
+# Закриття з'єднання
+dbDisconnect(sqlite_conn)
+```
+
+### Обробка даних: вилучення місць призначення та відправлення з JSON
+
+```{r}
+data <- orders %>%
+  mutate(
+    from_place = map_chr(where_from, ~ fromJSON(.)$place),
+    to_place = map_chr(where_to, ~ ifelse(is.na(.) | . == "", "По городу", fromJSON(.)$place))
+  )
+
+# Топ популярних місць відправлення
+top_places_from <- data %>%
+  group_by(from_place, to_place) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count)) %>%
+  head(10)
+
+# Виводимо топ-10 популярних місць відправлення
+top_places_from %>%
+  kable()
+```
+
+### Визначимо середню тривалість поїзком в залежності від часу доби
+
+```{r}
+
+# Розраховуємо тривалість поїздки (у хвилинах) та фільтруємо за розумним порогом
+
+data <- orders %>%
+  mutate(
+    start_time = as.POSIXct(finish_pickup_date, origin = "1970-01-01"),
+    end_time = as.POSIXct(finish_date),
+    # Обчислення тривалості поїздки у хвилинах
+    duration = as.numeric(difftime(end_time, start_time, units = "mins"))
+  )
+
+# Топ-10 найдовших поїздок
+top_durations <- data %>%
+  arrange(desc(duration)) %>%
+  head(10)
+
+# Виводимо топ-10 найдовших поїздок
+top_durations %>% select(id, start_time, end_time, duration)
+
+# Відсікаємо аномальні значення
+
+data <- data %>%
+  filter(duration > 0 & duration <= 300) 
+
+# Середня тривалість поїздок за часом доби
+
+time_of_day_analysis <- data %>%
+  mutate(
+    time_of_day = case_when(
+      hour(start_time) >= 5 & hour(start_time) < 12 ~ "Утро",
+      hour(start_time) >= 12 & hour(start_time) < 17 ~ "День",
+      hour(start_time) >= 17 & hour(start_time) < 21 ~ "Вечер",
+      TRUE ~ "Ночь"
+    )
+  ) %>%
+  group_by(time_of_day) %>%
+  summarise(avg_duration = mean(duration, na.rm = TRUE))
+
+# Виведення середнього часу поїздок за часом доби
+time_of_day_analysis
+
+```
+
+### Як попит на таксі змінюється залежно від дня та часу доби ?
+
+```{r}
+# Обробка даних для аналізу за годинами та днями тижня
+data <- orders %>%
+  mutate(
+    hour = hour(as.POSIXct(create_date, origin = "1970-01-01")),
+    day = wday(as.POSIXct(create_date, origin = "1970-01-01"), label = TRUE)
+  ) %>%
+  group_by(day, hour) %>%
+  summarise(count = mean(n(), na.rm = TRUE)) %>%
+  ungroup() %>%
+  pivot_wider(names_from = hour, values_from = count, values_fill = 0) %>%
+  pivot_longer(cols = -day, names_to = "hour", values_to = "count")
+
+# Перетворення hour у числовий формат
+data$hour <- as.numeric(data$hour)
+
+# Побудова графіка
+p <- ggplot(data, aes(x = hour, y = count, color = day)) +
+  geom_line() +
+  labs(title = "Середня кількість поїздок за днями тижня та годинами",
+       x = "Година", y = "Середня кількість поїздок") +
+  theme_minimal()
+
+# Перетворюємо графік ggplot у інтерактивний plotly
+ggplotly(p)
+```
+
+### Пунктуальність водіїв: Вивчити час подачі таксі до місця замовлення.
+
+```{r}
+# Перетворюємо часові мітки у формат datetime
+data <- orders %>%
+  mutate(
+    create_date = as.POSIXct(create_date),
+    create_time = as.POSIXct(start_pickup_date),
+    pickup_time = as.POSIXct(finish_pickup_date),
+    wait_time = as.numeric(difftime(pickup_time, create_time, units = "mins")),
+    season = case_when(
+      month(create_date) %in% c(12, 1, 2) ~ "Зима",
+      month(create_date) %in% c(3, 4, 5) ~ "Весна",
+      month(create_date) %in% c(6, 7, 8) ~ "Літо",
+      TRUE ~ "Осінь"
+    )
+  ) %>%
+  filter(wait_time > 0 & wait_time <= 30)
+
+mean_wait <- data %>%
+  group_by(hour = hour(create_time), season) %>%
+  summarise(avg_wait_time = mean(wait_time, na.rm = TRUE))
+
+# Графік середнього часу очікування
+p <- ggplot(mean_wait, aes(x = factor(hour), y = avg_wait_time, fill = season)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_fill_manual(values = c("Зима" = "#1f78b4", "Весна" = "#33a02c", "Літо" = "#e31a1c", "Осінь" = "#ff7f00")) +
+    labs(title = "Середній час очікування таксі за годинами дня та сезонами",
+       x = "Години дня",
+       y = "Середній час очікування (хв)") +
+  theme_minimal()
+
+# Перетворюємо графік ggplot у інтерактивний plotly
+ggplotly(p)
+```
+
+### Популярність тарифів залежно від середньої дистанції та тривалості поїздок
+
+```{r}
+
+# Групуємо дані за замовленнями
+orders_data <- orders %>%
+  mutate(
+    total_distance = inside_distance + outside_distance,
+    create_time = as.POSIXct(start_pickup_date),
+    pickup_time = as.POSIXct(finish_pickup_date),
+    wait_time = as.numeric(difftime(pickup_time, create_time, units = "mins")),
+  ) %>%
+  filter(total_distance > 0, total_distance <= 50, wait_time > 0, wait_time <= 30)
+
+
+# Групування даних
+orders_data <- orders_data %>%
+  group_by(dist_group = cut(total_distance, breaks = seq(0, 50, by = 2)),
+           time_group = cut(wait_time, breaks = seq(0, 30, by = 2))) %>%
+  summarise(count = n(),
+            avg_dist = mean(total_distance, na.rm = TRUE),
+            avg_wait_time = mean(wait_time, na.rm = TRUE))
+
+
+ggplot(orders_data, aes(x = avg_dist, y = avg_wait_time)) +
+  geom_point(aes(size = count), alpha = 1/2) +
+  geom_smooth() +
+  scale_size_area() + 
+  labs(
+    title = "Залежність кількості замовлень від дистанції та часу подачі",
+    x = "Дистанція (км)",
+    y = "Час подачі (хв)"
+  ) +
+  theme_minimal()
+```
+
+
+### Популярність тарифів залежно від середньої дистанції та тривалості поїздок
+
+```{r}
+library(tidyverse)
+
+# Готуємо дані для аналізу популярності тарифів залежно від дистанції
+tariffs_data <- orders %>%
+  mutate(
+    total_distance = inside_distance + outside_distance
+  ) %>%
+  filter(rec_tariff > 0, total_distance > 0, total_distance <= 50) %>%
+  group_by(type_tariff, dist_group = cut(total_distance, breaks = seq(0, 50, by = 1))) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  # Перетворюємо фактори у числовий формат для графіка
+  mutate(dist_group_num = as.numeric(sub("\\((.+),.+\\]", "\\1", as.character(dist_group))))
+
+
+head(tariffs_data)
+
+# Побудова графіка залежності кількості замовлень від дистанції за тарифами
+p <- ggplot(tariffs_data, aes(x = dist_group_num, y = count, color = type_tariff)) +
+  geom_line() +
+    labs(
+    title = "Популярність тарифів залежно від дистанції поїздки",
+    x = "Дистанція (км)",
+    y = "Кількість замовлень"
+  ) +
+  theme_minimal()
+
+ggplotly(p)
+```
+
+
+### Отримаємо подальшу інформацію для наступного завдання
+
+```{r}
+# Підключення до SQLite для використання збережених даних
+sqlite_conn <- dbConnect(SQLite(), dbname = "orders_stat.db")
+# Отримання даних з таблиці з SQLite
+data <- dbGetQuery(sqlite_conn, "SELECT * FROM orders_stat")
+# Закриття з'єднання
+dbDisconnect(sqlite_conn)
+```
+
+### Лояльність клієнтів: Оцінити, які клієнти найчастіше користуються послугами, щоб виявити "постійних" клієнтів.
+
+```{r}
+# Фільтрація активних клієнтів
+active_clients <- data %>%
+  filter(trip_count > 1) # наприклад, клієнти з більш ніж 1 поїздкою
+
+# Візуалізація: кількість поїздок на клієнта
+p <- ggplot(active_clients, aes(x = trip_count)) +
+  geom_histogram(binwidth = 0.5, fill = "skyblue", color = "black") +
+  labs(
+    title = "Частота поїздок за клієнтами",
+    x = "Кількість поїздок",
+    y = "Кількість клієнтів"
+  ) +
+  theme_minimal()
+
+ggplotly(p)
+
+# Візуалізація: зв'язок днів з першої поїздки та кількості поїздок
+p <- ggplot(active_clients, aes(x = days_since_first_trip, y = trip_count)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm") +
+  labs(
+    title = "Кількість поїздок за часом з першої поїздки",
+    x = "Днів з першої поїздки",
+    y = "Кількість поїздок"
+  ) +
+  theme_minimal()
+
+ggplotly(p)
+
+```

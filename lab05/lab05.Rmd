@@ -1,0 +1,195 @@
+---
+title: "Лабораторна робота №5. Побудова регресійних моделей"
+author: "Матвєєв Р.В."
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: yes
+    toc_float: true
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r}
+# Встановлення та підключення пакетів, якщо вони ще не встановлені
+if (!require(DBI)) install.packages("DBI")
+if (!require(RSQLite)) install.packages("RSQLite")
+if (!require(dplyr)) install.packages("dplyr")
+if (!require(randomForest)) install.packages("randomForest", repos = "https://cloud.r-project.org/")
+if (!require(knitr)) install.packages("knitr")
+if (!require(GGally)) install.packages("GGally")
+if (!require(caret)) install.packages("caret", repos = "https://cloud.r-project.org/")
+
+# Підключення бібліотек
+library(DBI)
+library(RSQLite)
+library(dplyr)
+library(knitr)
+library(randomForest)
+library(GGally)
+library(caret)
+
+```
+
+# Виконання індивідуального завдання: оцінка популярності водіїв
+
+## Отримання даних
+
+```{r}
+
+# Вказання шляху до бази даних SQLite
+sqlite_db_path <- "driver_popularity.db"
+
+# Підключення до SQLite для використання збережених даних
+sqlite_conn <- dbConnect(SQLite(), dbname = sqlite_db_path)
+
+# Отримання даних з таблиці driver_popularity в SQLite
+driver_data <- dbGetQuery(sqlite_conn, "SELECT * FROM driver_popularity WHERE completed_orders > 0")
+
+# Закриття з'єднання
+dbDisconnect(sqlite_conn)
+
+# Перегляд перших рядків даних
+head(driver_data)
+
+```
+
+## Генерація тестового проекту, створення моделей та їх оценка
+
+```{r}
+# Перевірка кореляцій між змінними
+driver_data %>%
+  select(completed_orders, canceled_orders, proposals_created, total_earnings) %>% 
+  cor() %>%
+  knitr::kable(caption = "Таблиця коефіцієнтів кореляції")
+```
+
+```{r}
+driver_data %>%
+  select(completed_orders, canceled_orders, proposals_created, total_earnings) %>% 
+ggpairs()
+```
+
+## Побудова базової моделі лінійної регресії
+
+```{r}
+
+# Побудова регресійної моделі
+model <- lm(total_earnings ~ completed_orders + canceled_orders + proposals_created, data = driver_data)
+
+# Перегляд результатів моделі
+summary(model)
+plot(model)
+
+```
+
+## Виключаємо викиди та повторно здійснюємо побудову моделі регресії.
+
+```{r}
+
+driver_data_filter = driver_data %>%
+  filter(!row_number() %in% c(1654, 3157))
+
+model <- lm(total_earnings ~ completed_orders + canceled_orders + proposals_created, data = driver_data_filter)
+
+# Перегляд результатів моделі
+summary(model)
+plot(model)
+
+```
+
+## Скористаємося покроковою процедурою включення з вилученням слабких предикторів
+
+```{r}
+
+model <- lm(total_earnings ~ completed_orders, data = driver_data_filter)
+
+modelStep <- step(model, trace = 0)
+summary(modelStep)
+anova(model, modelStep)
+```
+
+## Виконаємо тестування двох моделей з використанням десятикратної перехресної перевірки (cross validation).
+
+```{r}
+modelTrain = train(total_earnings ~ completed_orders + canceled_orders + proposals_created, 
+                   data = driver_data_filter, 
+                   method = 'lm', 
+                   trainControl = trainControl(method = "cv")
+                   )
+
+modelTrainStep <- train(total_earnings ~ completed_orders, 
+                        data = driver_data_filter, 
+                        method = 'lm', 
+                        trainControl = trainControl(method = "cv")
+                        )
+
+modelTrain
+
+modelTrainStep
+```
+
+## Цю модель можна покращити, вилучивши константу зі специфікації моделі
+
+```{r}
+modelForCompleted <- lm(total_earnings ~ completed_orders - 1, data = driver_data_filter)
+summary(modelForCompleted)
+plot(modelForCompleted)
+
+ggplot(driver_data_filter,
+       aes(x = completed_orders - 1, y = total_earnings,
+           colour = canceled_orders)) +
+  labs(title = "Залежність заробітку від кількості виконаних замовлень",
+       subtitle = "Лінійна регресія з 95% довірчими межами",
+       caption = "Без коригування. Кольором виділено кількість відхиленних замовлень", 
+       x = "Кількість виконаних замовлень", y = "Дохід") +
+  geom_point() +
+  stat_smooth(method=lm, se = TRUE, fullrange = TRUE) 
+```
+
+
+## Виходячи з правила “трьох сигм,” для коригування лінійної моделі доцільно видалення ще двох точок
+
+```{r}
+dataFilterThreeSigma = driver_data %>%
+  filter(!row_number() %in% c(259, 223, 1654, 3157))
+
+lmByThreeSigma <- lm(total_earnings ~ completed_orders - 1, data = dataFilterThreeSigma)
+
+summary(lmByThreeSigma)
+plot(lmByThreeSigma)
+
+ggplot(dataFilterThreeSigma,
+       aes(x = completed_orders - 1, y = total_earnings,
+           colour = canceled_orders)) +
+  labs(title = "Залежність заробітку від кількості виконаних замовлень",
+       subtitle = "Лінійна регресія з 95% довірчими межами",
+       caption = "З коригуванням. Кольором виділено кількість відхиленних замовлень", 
+       x = "Кількість виконаних замовлень", y = "Дохід") +
+  geom_point() +
+  stat_smooth(method=lm, se = TRUE, fullrange = TRUE) 
+
+```
+
+### Точковий та інтервальний прогноз охоплення аудиторії
+
+```{r}
+completedNumber <- data.frame(completed_orders=c(200, 400, 800, 850))
+pre <- predict(lmByThreeSigma, completedNumber, interval="confidence")
+knitr::kable(cbind(completedNumber, pre),
+             caption = "Точковий та інтервальний прогноз охоплення аудиторії")
+```
+
+
+ 
+
+
+
+                   
+
+
+

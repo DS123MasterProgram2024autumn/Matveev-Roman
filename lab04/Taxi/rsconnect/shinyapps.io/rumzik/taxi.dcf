@@ -1,0 +1,10 @@
+name: taxi
+title:
+username: rumzik
+account: rumzik
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 13332674
+bundleId: 9376832
+url: https://rumzik.shinyapps.io/taxi/
+version: 1
