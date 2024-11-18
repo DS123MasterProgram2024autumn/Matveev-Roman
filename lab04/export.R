@@ -7,11 +7,6 @@ source("../exportMySQLData.R")
 db_path <- file.path(getwd(), "Taxi/taxi_orders.db")
 cat("Повний шлях до бази даних:", db_path, "\n")
 
-# Видалення старого файлу, якщо він існує
-if (file.exists(db_path)) {
-  file.remove(db_path)
-}
-
 # Підключаємося до SQLite і створюємо нову базу даних
 sqlite_conn <- dbConnect(SQLite(), dbname = db_path)
 

@@ -19,6 +19,11 @@ params <- list(
 # transfer_data_to_sqlite: Універсальна функція для переносу даних з MySQL до SQLite
 
 transfer_data_to_sqlite <- function(sql_query, output_table_name, sqlite_db_path) {
+  
+  if (file.exists(sqlite_db_path)) {
+    file.remove(sqlite_db_path)
+  }
+  
   # Підключення до бази даних MySQL
   mysql_conn <- do.call(dbConnect, c(MySQL(), params))
   
