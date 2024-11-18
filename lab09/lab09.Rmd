@@ -1,0 +1,105 @@
+---
+title: "Лабораторна робота № 9. Веб скрепінг. Пакет rvest. Short-версія"
+author: "Матвєєв Р.В."
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: yes
+    toc_float: true
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+#options(repos = c(CRAN = "https://cloud.r-project.org"))
+```
+
+# Вступ
+
+Отримати дані про якість повітря з веб-сторінки конкретної станції за допомогою пакету rvest.
+
+# Установка та підключення бібліотек
+
+```{r}
+# Установка необхідних пакетів
+#install.packages("rvest")
+#install.packages("dplyr")
+
+# Підключення бібліотек
+library(rvest)
+library(dplyr)
+library(stringr)
+library(xml2)
+
+
+```
+
+# Завантаження сторінки та отримання даних
+
+
+```{r}
+# URL сторінки станції
+url <- "https://www.saveecobot.com/station/21630"
+
+# Завантаження сторінки
+page <- read_html(url)
+
+# Знаходимо елемент <p>, що містить дані
+p_element <- page %>%
+  html_element(xpath = "//h4[contains(text(), 'Первинні дані')]/following-sibling::p")
+
+# Видаляємо всі блоки <small> з цього елемента
+p_element %>%
+  html_nodes("small") %>%
+  xml_remove()
+
+# Тепер отримуємо очищений текст
+raw_data <- p_element %>%
+  html_text()
+
+# Розділення даних за <br>
+parsed_data <- strsplit(raw_data, "\n")[[1]]
+
+# Видалення зайвих пробілів
+parsed_data <- trimws(parsed_data)
+
+# Видалення порожніх рядків
+parsed_data <- parsed_data[parsed_data != ""]
+
+# Функція для видалення емодзі
+remove_emoji <- function(text) {
+  stringr::str_remove_all(text, "[\\p{So}\\p{Sc}\\p{Sk}\\p{Sm}\\p{Cn}]+")
+}
+
+# Обробка даних: видалення емодзі та розділення на "ключ: значення"
+parsed_data_cleaned <- lapply(parsed_data, function(row) {
+  key <- sub(":.*", "", row) # Ліва частина до ":"
+  key <- remove_emoji(key) # Видалення емодзі
+  value <- sub(".*: ", "", row) # Права частина після ":"
+  c(key = key, value = value)
+})
+
+# Перетворення у таблицю
+data_table <- do.call(rbind, parsed_data_cleaned)
+data_table <- as.data.frame(data_table, stringsAsFactors = FALSE)
+colnames(data_table) <- c("Ключ", "Значення")
+
+# Вивід результатів
+print(data_table)
+```
+
+Формування таблиці з даними
+
+```{r}
+
+
+```
+# Результати
+
+Дані про якість повітря, отримані зі сторінки станції, представлені у вигляді таблиці:
+
+# Висновки
+
+За допомогою пакету rvest ми отримали актуальні дані про якість повітря зі сторінки конкретної станції. Це демонструє ефективність rvest для виконання веб-скрейпінгу статичних веб-сторінок.
+
+
