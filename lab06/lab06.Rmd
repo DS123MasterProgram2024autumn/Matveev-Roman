@@ -1,0 +1,122 @@
+---
+title: "Лабораторна робота №6. Побудова моделей класифікації"
+author: "Матвєєв Р.В."
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: yes
+    toc_float: true
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+```
+
+```{r}
+library(DBI)
+library(RSQLite)
+library(caret)
+library(dplyr)
+```
+
+# Вступ
+
+У цій роботі розглядається побудова моделі класифікації, яка передбачає пункт призначення клієнта на основі факторів, таких як місце замовлення, час доби, день тижня та тип тарифу. Навчена модель зберігається у базі даних для подальшого використання, що дозволяє забезпечити її інтеграцію у реальні системи. Завдання поділяється на кілька етапів: підготовку даних, навчання моделі, збереження та відновлення моделі з бази даних, а також оцінку її точності.
+
+Запропонований підхід може бути адаптований для вирішення інших задач, пов'язаних із аналізом даних у сфері транспортних послуг, таких як прогнозування завантаженості водіїв чи оптимізація маршрутів.
+
+## Підготовка даних
+
+### Завантаження даних з бази даних та підготовка ознак.
+
+```{r}
+# Підключення до бази даних
+db <- dbConnect(SQLite(), dbname = "orders.db")
+
+# Завантаження даних
+query <- "SELECT * FROM orders"
+data <- dbGetQuery(db, query)
+
+# Оптимізація з використанням mutate
+data <- data %>%
+  mutate(
+    from_lat = as.numeric(from_lat),
+    from_lon = as.numeric(from_lon),
+    to_lat = as.numeric(to_lat),
+    to_lon = as.numeric(to_lon),
+    hour = as.numeric(format(as.POSIXct(create_date), "%H")),  # Отримання години із часу замовлення
+    day_of_week = as.numeric(format(as.POSIXct(create_date), "%u")),  # Отримання дня тижня
+    destination = factor(paste0(round(to_lat, 3), ",", round(to_lon, 3)))  # Пункт призначення як фактор
+  )
+
+# Видалення зайвих колонок
+data <- subset(data, select = -c(create_date))
+
+```
+
+### Розподіл даних і навчання моделі
+
+Створення навчальної та тестової вибірки, налаштування та навчання моделі.
+
+```{r}
+# Розподіл даних на навчальну та тестову вибірки
+set.seed(1234)
+trainIndex <- createDataPartition(data$destination, p = .8, list = FALSE)
+trainSet <- data[trainIndex,]
+testSet <- data[-trainIndex,]
+
+# Налаштування моделі
+fitCtrl <- trainControl(method = "repeatedcv", number = 10, repeats = 5)
+model <- train(destination ~  from_lat + from_lon + rec_tariff + hour + day_of_week, 
+               data = trainSet, 
+               method = "lda", 
+               trControl = fitCtrl)
+
+# Збереження остаточної моделі
+fit <- model$finalModel
+```
+
+### Збереження моделі в базу даних
+
+Збереження навченої моделі з використанням серіалізації.
+
+```{r}
+# Серіалізація моделі
+fit_char <- rawToChar(serialize(fit, NULL, TRUE))
+
+# Збереження моделі у базу даних
+dbExecute(db, "CREATE TABLE IF NOT EXISTS models (id INTEGER PRIMARY KEY, model TEXT)")
+dbExecute(db, "DELETE FROM models WHERE id = 1")
+dbExecute(db, "INSERT INTO models (id, model) VALUES (?, ?)", params = list(1, fit_char))
+
+```
+
+## Імпорт моделі та тестування
+
+Імпорт моделі з бази даних, прогнозування на тестових даних та оцінка якості.
+
+```{r}
+# Імпорт моделі
+
+model_data <- dbGetQuery(db, "SELECT model FROM models WHERE id = 1")
+fit_imported <- unserialize(charToRaw(model_data$model[1]))
+
+# Прогнозування на тестових даних
+predictions <- predict(fit_imported, newdata = testSet[, c("from_lat", "from_lon", "rec_tariff", "hour", "day_of_week")])
+
+# Оцінка якості класифікації
+matrix <- confusionMatrix(predictions$class, testSet$destination)
+
+library(knitr)
+# Виведення таблиці "Overall Statistics"
+overall_stats <- matrix$overall
+kable(as.data.frame(t(overall_stats)), caption = "Overall Statistics")
+
+
+```
+
+# Висновки
+
+У цьому документі ми побудували модель класифікації, зберегли її в базу даних та застосували для прогнозування пункту призначення клієнтів. Методи можуть бути розширені для більш складних моделей чи задач.
+
