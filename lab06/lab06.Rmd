@@ -18,6 +18,7 @@ library(DBI)
 library(RSQLite)
 library(caret)
 library(dplyr)
+library(knitr)
 ```
 
 # Вступ
@@ -108,7 +109,6 @@ predictions <- predict(fit_imported, newdata = testSet[, c("from_lat", "from_lon
 # Оцінка якості класифікації
 matrix <- confusionMatrix(predictions$class, testSet$destination)
 
-library(knitr)
 # Виведення таблиці "Overall Statistics"
 overall_stats <- matrix$overall
 kable(as.data.frame(t(overall_stats)), caption = "Overall Statistics")
@@ -119,4 +119,8 @@ kable(as.data.frame(t(overall_stats)), caption = "Overall Statistics")
 # Висновки
 
 У цьому документі ми побудували модель класифікації, зберегли її в базу даних та застосували для прогнозування пункту призначення клієнтів. Методи можуть бути розширені для більш складних моделей чи задач.
+
+```{r}
+dbDisconnect(db)
+```
 

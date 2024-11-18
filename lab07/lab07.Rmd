@@ -39,6 +39,7 @@ db <- dbConnect(SQLite(), dbname = "orders.db")
 # Завантаження даних
 query <- "SELECT * FROM orders"
 data <- dbGetQuery(db, query)
+dbDisconnect(db)
 
 # Обробка даних
 data <- data %>%
