@@ -1,0 +1,268 @@
+---
+title: "RGR"
+author: "Матвєєв Р.В."
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: yes
+    toc_float: true
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+```
+
+
+```{r}
+library(DBI)
+library(RSQLite)
+library(dplyr)
+library(lubridate)
+library(caret)
+```
+
+```{r}
+library(doParallel)
+cl <- makeCluster(detectCores() - 1)  # Використовуємо всі ядра, крім одного
+registerDoParallel(cl)
+```
+
+
+# Вступ
+
+У цій роботі ми реалізуємо модель для прогнозування пункту призначення клієнта. На додаток до основних характеристик поїздки (час, тариф, місце відправлення), враховуватиметься історія клієнта.
+
+# Підготовка даних
+
+
+
+```{r}
+# Підключення до бази даних
+db <- dbConnect(SQLite(), dbname = "orders.db")
+# Завантаження даних
+query <- "SELECT * FROM orders WHERE client_id IN (176779,104756,23722,211166,30980)"
+#query <- "SELECT * FROM orders"
+orders <- dbGetQuery(db, query)
+dbDisconnect(db)
+
+# Оптимізація з використанням mutate
+data <- orders %>%
+  mutate(
+    from_lat = as.numeric(from_lat),
+    from_lon = as.numeric(from_lon),
+    to_lat = as.numeric(to_lat),
+    to_lon = as.numeric(to_lon),
+    hour = as.numeric(format(as.POSIXct(create_date), "%H")),  # Отримання години із часу замовлення
+    day_of_week = as.numeric(format(as.POSIXct(create_date), "%u")),  # Отримання дня тижня
+  )
+
+# Видалення зайвих колонок
+data <- subset(data, select = -c(create_date))
+
+# Видалення пропущених значень
+data <- na.omit(data)
+
+# Вибір найпопулярніших пунктів призначення (класифікація)
+top_destinations <- data %>%
+  group_by(to_lat, to_lon) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count)) %>%
+  ungroup() %>%  # Знімає групування
+  slice(1:20)  # Топ-20 пунктів
+
+top_destinations %>%
+  #head() %>%
+  kable()
+
+data <- data %>%
+  mutate(
+    destination = factor(
+      ifelse(
+        paste0(round(to_lat, 4), ",", round(to_lon, 4)) %in% 
+          paste0(round(top_destinations$to_lat, 4), ",", round(top_destinations$to_lon, 4)),
+        paste0(round(to_lat, 4), ",", round(to_lon, 4)),
+        "Other"
+      )
+    )
+  )
+
+```
+
+# Аналіз історії клієнта
+
+Додамо історичні дані для кожного клієнта:
+- Кількість попередніх замовлень.
+- Найчастіший пункт призначення.
+
+```{r}
+# Кількість попередніх замовлень
+client_history <- data %>%
+  group_by(client_id) %>%
+  summarise(
+    total_orders = n(),
+    frequent_destination = names(sort(table(destination), decreasing = TRUE)[1])
+  )
+
+# Додавання інформації до основного набору даних
+data <- data %>%
+  left_join(client_history, by = "client_id")
+
+```
+
+# Навчання моделі класифікації
+
+```{r}
+set.seed(1234)
+
+# Розподіл на навчальну та тестову вибірки
+trainIndex <- createDataPartition(data$destination, p = 0.8, list = FALSE)
+trainSet <- data[trainIndex,]
+testSet <- data[-trainIndex,]
+
+# 5-кратна крос-валідація
+control <- trainControl(method = "cv", number = 5)
+
+# Навчання моделі (Random Forest)
+
+model <- train(
+  destination ~ from_lat + from_lon + hour + day_of_week + total_orders + frequent_destination,
+  data = trainSet,
+  method = "rf", # or fast alternative "ranger"
+  trControl = control,
+  #tuneGrid = expand.grid(mtry = 3),  # Зменшуємо кількість ознак для кожного дерева
+  ntree = 150  # Зменшуємо кількість дерев
+)
+
+# Прогнозування
+predictions <- predict(model, newdata = testSet)
+
+cat("Розподіл прогнозованих значень:\n")
+print(table(predictions))
+
+# Перетворення на фактори з однаковими рівнями
+#predictions <- factor(predictions, levels = levels(testSet$destination))
+#testSet$destination <- factor(testSet$destination, levels = levels(testSet$destination))
+# Видалення порожніх рівнів
+#predictions <- droplevels(predictions)
+#testSet$destination <- droplevels(testSet$destination)
+
+# Оцінка моделі
+result <- confusionMatrix(predictions, testSet$destination)
+
+# Виведення таблиці "Overall Statistics"
+overall_stats <- result$overall
+kable(as.data.frame(t(overall_stats)), caption = "Overall Statistics")
+
+```
+
+# Навчання моделі регресії
+
+```{r}
+set.seed(1234)
+
+# Встановлення пакету
+library(pls)
+
+# Підготовка даних
+X <- as.matrix(trainSet[, c("from_lat", "from_lon", "hour", "day_of_week", "total_orders")])
+Y <- as.matrix(trainSet[, c("to_lat", "to_lon")])
+
+# Навчання моделі
+pls_model <- plsr(Y ~ X, ncomp = 2, validation = "CV")
+
+# Прогнозування
+X_test <- as.matrix(testSet[, c("from_lat", "from_lon", "hour", "day_of_week", "total_orders")])
+predictions <- predict(pls_model, newdata = X_test, ncomp = 2)
+
+# Конвертація масиву в матрицю
+predictions <- predictions[, , 1]
+
+# Оцінка точності
+mae_lat <- mean(abs(predictions[, 1] - testSet$to_lat))
+mae_lon <- mean(abs(predictions[, 2] - testSet$to_lon))
+
+cat("Середня абсолютна похибка для широти:", mae_lat, "\n")
+cat("Середня абсолютна похибка для довготи:", mae_lon, "\n")
+
+
+```
+
+
+# Тестування
+
+Показати топ-5 клієнтів за кількістю замовлень.
+Передбачити ймовірний пункт призначення для конкретного клієнта, подаючи вхідні дані (точку А та поточний час).
+
+```{r}
+# Топ-5 клієнтів за кількістю замовлень
+top_clients <- client_history %>%
+  arrange(desc(total_orders)) %>%
+  ungroup() %>%  # Знімає групування
+  slice(1:5)
+
+print("Топ-5 клієнтів за кількістю замовлень:")
+print(top_clients)
+
+# Передбачення пункту призначення для одного клієнта
+predict_destination <- function(client_id, from_lat, from_lon, hour, day_of_week) {
+  # Формуємо новий запис для прогнозу
+  new_data <- data.frame(
+    from_lat = from_lat,
+    from_lon = from_lon,
+    hour = hour,
+    day_of_week = day_of_week,
+    total_orders = client_history$total_orders[client_history$client_id == client_id],
+    frequent_destination = client_history$frequent_destination[client_history$client_id == client_id]
+  )
+
+  # Прогнозуємо пункт призначення
+  predicted_destination <- predict(model, new_data)
+  return(predicted_destination)
+}
+
+# Приклад прогнозу для клієнта з top_clients
+client_id <- top_clients$client_id[1]  # Вибираємо першого клієнта з топ-5
+#'{"place":"улица Якуба Коласа, 19","locality":"Минск","porch":"","latitude":"53.9216011","longitude":"27.5882967"}'
+from_lat <- 53.92160  # Точка А (широта)
+from_lon <- 27.58829  # Точка А (довгота)
+hour <- 0  # Поточний час
+day_of_week <- 1  # Номер дня тижня
+
+predicted <- predict_destination(client_id, from_lat, from_lon, hour, day_of_week)
+
+cat("Ймовірний пункт призначення для клієнта", client_id, ":", predicted, "\n")
+
+# Отримуємо рівні фактора
+#levels(data$destination)
+
+# Отримуємо рівні фактора
+predicted_levels <- levels(data$destination)
+
+# Отримуємо текстове значення фактора
+predicted_destination_text <- predicted_levels[as.numeric(predicted)]
+
+# Виводимо результат
+cat("Ймовірний пункт призначення для клієнта", client_id, ":", predicted_destination_text, "\n")
+
+```
+
+У базі даних для цього клієнта є такі замовлення
+{"place":"улица Якубова, 18","locality":"Минск","porch":"","latitude":"53.85261917","longitude":"27.59873581"}
+які є у проміжок 0-1 часу дня понеділка
+
+і це означає, що модель прогнозує достовірно
+
+
+# Висновки
+
+Ми створили модель для прогнозування пункту призначення клієнта, використовуючи такі ознаки:
+- Місце відправлення.
+- Час замовлення (година, день тижня).
+- Історія клієнта (кількість замовлень, найпопулярніший пункт призначення).
+- Це дозволяє значно покращити точність моделі завдяки персоналізованому підходу.
+
+```{r}
+stopCluster(cl)  # Зупиняємо паралельні обчислення
+```
