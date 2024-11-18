@@ -1,0 +1,137 @@
+---
+title: "Лабораторна робота №7. Пошук асоціативних правил"
+author: "Матвєєв Р.В."
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: yes
+    toc_float: true
+    highlight: tango
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+```
+
+
+```{r}
+library(DBI)
+library(RSQLite)
+library(dplyr)
+library(jsonlite)
+library(arules)
+library(arulesViz)
+```
+
+# Вступ
+
+Мета цієї роботи — виконати асоціативний аналіз даних замовлень таксі для виявлення правил, які допоможуть покращити процеси планування та управління сервісом. У ході роботи буде використано дані про час замовлення, пристрій користувача, тип поїздки (загородня чи міська), а також статус замовлення. Це дозволить знайти закономірності та запропонувати рекомендації для оптимізації роботи сервісу.
+
+# Підготовка даних
+
+Завантажимо дані з бази даних, обробимо їх та додамо нові ознаки.
+
+```{r}
+# Підключення до бази даних
+db <- dbConnect(SQLite(), dbname = "orders.db")
+
+# Завантаження даних
+query <- "SELECT * FROM orders"
+data <- dbGetQuery(db, query)
+
+# Обробка даних
+data <- data %>%
+  mutate(
+    # Об'єднуємо статуси 'prepare_remove' та 'removed'
+    status = case_when(
+      status %in% c("prepare_remove", "removed") ~ "removed",
+      TRUE ~ status
+    ),
+    # Час доби
+    time_of_day = case_when(
+      as.numeric(format(as.POSIXct(create_date), "%H")) %in% 6:11 ~ "Morning",
+      as.numeric(format(as.POSIXct(create_date), "%H")) %in% 12:17 ~ "Day",
+      as.numeric(format(as.POSIXct(create_date), "%H")) %in% 18:23 ~ "Evening",
+      TRUE ~ "Night"
+    ),
+    # Ознака "загородня поїздка"
+    outside_trip = ifelse(distance_outside > 0, "Yes", "No"),
+    # Ознака "по місту"
+    city_trip = ifelse(is.null(where_from), "Yes", "No")
+  ) %>%
+  select(-create_date, -create_from, -rec_tariff, -distance_outside, -where_from)  # Видаляємо зайві колонки
+
+```
+
+# Перетворення в формат транзакцій
+
+Перетворимо дані в формат транзакцій для роботи з асоціативними правилами.
+
+```{r}
+
+# Перетворення у формат транзакцій
+transactions <- as(data, "transactions")
+
+# Перевірка даних
+summary(transactions)
+
+```
+
+# Виконання алгоритму Apriori
+
+Запустимо алгоритм Apriori для виявлення асоціативних правил.
+
+```{r}
+# Запуск алгоритму Apriori
+rules <- apriori(
+  transactions,
+  parameter = list(supp = 0.01, conf = 0.8, maxlen = 5)
+)
+
+# Кількість знайдених правил
+cat("Кількість знайдених правил:", length(rules), "\n")
+
+# Виведення перших кількох правил
+rules %>%
+  inspect() %>% ## print all rules
+  knitr::kable() 
+
+```
+
+# Фільтрація правил
+
+Знайдемо правила, які передбачають певний статус замовлення.
+
+```{r}
+# Фільтрація правил за статусом
+rules_status <- apriori(
+  transactions,
+  parameter = list(supp = 0.005, conf = 0.5),
+  appearance = list(rhs = c("status=done", "status=cancel", "status=removed", "status=timeout"), default = "lhs")
+)
+
+# Сортування правил за ліфтом
+rules_status_sorted <- sort(rules_status, by = "lift")
+
+# Виведення перших кількох правил
+rules_status_sorted %>%
+  inspect() %>% ## print all rules
+  knitr::kable() 
+
+```
+
+# Візуалізація результатів
+
+Виконаємо візуалізацію знайдених правил.
+
+```{r}
+# Графічна візуалізація
+plot(rules_status_sorted, method = "grouped")
+plot(rules_status_sorted, method = "graph", control = list(type = "items"))
+
+```
+
+# Висновки
+
+У цій роботі ми виконали асоціативний аналіз даних замовлень таксі. Було виявлено кілька правил, які пов'язують статуси замовлень із часом доби, типом пристрою та типом поїздки (загородня/міська). Ці результати можуть бути використані для оптимізації роботи сервісу та покращення обслуговування клієнтів.
