@@ -1,0 +1,108 @@
+---
+title: "Лабораторна робота № 8. Побудова ARIMA-моделі часового ряду і прогнозування на її основі (short version)"
+author: "Матвєєв Р.В."
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: yes
+    toc_float: true
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+```
+
+Мета: Побудувати ARIMA-модель для прогнозування середньої вартості поїздок за місяць у сервісі таксі. Використовуватимемо дані про виконані поїздки, групуючи їх за місяцями, та створимо прогноз на наступні кілька періодів.
+
+# Вступ
+
+Прогнозування динаміки середньої вартості поїздок є важливим завданням для сервісів таксі, адже це дозволяє краще планувати ціноутворення та оцінювати попит у майбутніх періодах. У цій роботі ми побудуємо ARIMA-модель для прогнозування середньої вартості поїздок за місяць, використовуючи дані про виконані замовлення.
+
+# Підготовка даних
+
+```{r}
+# Завантаження бібліотек
+library(DBI)
+library(RSQLite)
+library(dplyr)
+library(lubridate)
+library(forecast)
+library(ggplot2)
+
+```
+
+```{r}
+
+# Підключення до бази даних
+db <- dbConnect(SQLite(), dbname = "orders.db")
+
+# Завантаження даних
+query <- "SELECT * FROM orders"
+data <- dbGetQuery(db, query)
+
+# Перетворення Unix timestamp на дату та обчислення середньої вартості поїздок за місяць
+data <- data %>%
+  mutate(
+    create_date = as_datetime(create_date),  # Перетворення Unix timestamp у дату
+    month = floor_date(create_date, "month")  # Округлення до початку місяця
+  ) %>%
+  group_by(month) %>%
+  summarize(avg_price = mean(total_price, na.rm = TRUE))
+
+# Перетворення на часовий ряд
+time_series <- ts(data$avg_price, start = c(year(min(data$month)), month(min(data$month))), frequency = 12)
+
+# Виведення даних
+print(head(data))
+
+autoplot(time_series) +
+  xlab("Місяць") +
+  ylab("Середня вартість") +
+  ggtitle("Динаміка середньої вартості поїздок")
+
+```
+
+# Побудова ARIMA-моделі
+
+```{r}
+
+# Побудова автоматичної ARIMA-моделі
+fit <- auto.arima(time_series)
+
+# Виведення результатів моделі
+print(summary(fit))
+
+# Прогноз на 12 місяців
+forecast_data <- forecast(fit, h = 12)
+
+# Візуалізація прогнозу
+autoplot(forecast_data) +
+  xlab("Місяць") + ylab("Середня вартість") +
+  ggtitle("Прогноз середньої вартості поїздок")
+```
+
+# Побудова ARIMA-моделі вручну
+
+```{r}
+# Побудова ARIMA(1,1,1) вручну
+fit_manual <- Arima(time_series, order = c(1, 1, 1))
+
+# Виведення результатів
+print(summary(fit_manual))
+
+# Прогноз на 12 місяців
+forecast_manual <- forecast(fit_manual, h = 12)
+
+# Візуалізація
+autoplot(forecast_manual) +
+  xlab("Місяць") + ylab("Середня вартість") +
+  ggtitle("Прогноз середньої вартості (ARIMA(1,1,1))")
+
+```
+
+
+# Висновки
+
+У цій роботі ми побудували ARIMA-модель для прогнозування середньої вартості поїздок у сервісі таксі. Використання часових рядів дозволяє аналізувати динаміку цін та робити прогнози на наступні періоди. Отримані результати можуть бути використані для ухвалення рішень щодо ціноутворення та стратегічного планування.
+
